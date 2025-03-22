@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, GatewayIntentBits, Partials, PermissionFlagsBits } = require("discord.js");
 const axios = require('axios');
 
 const client = new Client({
@@ -14,7 +14,9 @@ const client = new Client({
 });
 
 // State management
-const translateChannels = new Map(); // Map<SourceChannelID, {targetChannelId, targetLanguage, imageSync, reactionSync}>
+// Change from Map<SourceChannelID, singleConfig> to Map<SourceChannelID, Array<config>>
+const translateChannels = new Map(); // Map<SourceChannelID, Array<{targetChannelId, targetLanguage, imageSync, reactionSync}>>
+
 const messageIdMap = new Map(); // Map<sourceMessageId, targetMessageId>
 
 async function translateText(text, targetLang) {
@@ -38,8 +40,17 @@ client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
 });
 
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isCommand()) return;
+
+  // Check if user has administrator permissions
+  if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      content: "❌ You need administrator permissions to use this command!",
+      ephemeral: true
+    });
+  }
 
   const { commandName, channelId } = interaction;
 
@@ -53,36 +64,66 @@ client.on("interactionCreate", async (interaction) => {
         if (!permissions.has("SendMessages")) {
           return interaction.reply("I can't send messages in that channel!");
         }
-
-        translateChannels.set(channelId, {
+      
+        const config = {
           targetChannelId: translateChannel.id,
           targetLanguage: targetLanguage.toLowerCase(),
           imageSync: false,
           reactionSync: false
-        });
+        };
+      
+        const existingConfigs = translateChannels.get(channelId) || [];
+        // Update existing config if channel already exists
+        const existingIndex = existingConfigs.findIndex(c => c.targetChannelId === translateChannel.id);
+        if (existingIndex !== -1) {
+          existingConfigs[existingIndex] = config;
+        } else {
+          existingConfigs.push(config);
+        }
+        
+        translateChannels.set(channelId, existingConfigs);
         await interaction.reply(`Translation sync configured for ${translateChannel.toString()} in ${targetLanguage}!`);
         break;
       }
 
       case "toggle-image-sync": {
-        const config = translateChannels.get(channelId);
-        if (!config) {
+        const targetChannel = interaction.options.getChannel("channel");
+        const enabled = interaction.options.getBoolean("enabled");
+      
+        const configs = translateChannels.get(channelId);
+        if (!configs) {
           return interaction.reply("Set up translation sync first using /setup-translation-sync");
         }
-        config.imageSync = interaction.options.getBoolean("enabled");
-        await interaction.reply(`Image synchronization ${config.imageSync ? "enabled" : "disabled"}!`);
+      
+        const targetConfig = configs.find(c => c.targetChannelId === targetChannel.id);
+        if (!targetConfig) {
+          return interaction.reply("No configuration found for the specified target channel.");
+        }
+      
+        targetConfig.imageSync = enabled;
+        await interaction.reply(`Image synchronization ${enabled ? "enabled" : "disabled"} for ${targetChannel.toString()}!`);
         break;
       }
+      
+// do the reaction synch
+case "toggle-reaction-sync": {
+  const targetChannel = interaction.options.getChannel("channel");
+  const enabled = interaction.options.getBoolean("enabled");
 
-      case "toggle-reaction-sync": {
-        const config = translateChannels.get(channelId);
-        if (!config) {
-          return interaction.reply("Set up translation sync first using /setup-translation-sync");
-        }
-        config.reactionSync = interaction.options.getBoolean("enabled");
-        await interaction.reply(`Reaction synchronization ${config.reactionSync ? "enabled" : "disabled"}!`);
-        break;
-      }
+  const configs = translateChannels.get(channelId);
+  if (!configs) {
+    return interaction.reply("Set up translation sync first using /setup-translation-sync");
+  }
+
+  const targetConfig = configs.find(c => c.targetChannelId === targetChannel.id);
+  if (!targetConfig) {
+    return interaction.reply("No configuration found for the specified target channel.");
+  }
+
+  targetConfig.reactionSync = enabled;
+  await interaction.reply(`Reaction synchronization ${enabled ? "enabled" : "disabled"} for ${targetChannel.toString()}!`);
+  break;
+}
     }
   } catch (error) {
     console.error(`Error handling command ${commandName}:`, error);
@@ -94,36 +135,35 @@ client.on("interactionCreate", async (interaction) => {
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !translateChannels.has(message.channelId)) return;
 
-  const config = translateChannels.get(message.channelId);
-  const targetChannel = await client.channels.fetch(config.targetChannelId);
+  const configs = translateChannels.get(message.channelId);
+  const displayName = message.member?.displayName || message.author.username;
 
-  try {
-    // Get the author's server-specific display name
-    const displayName = message.member?.displayName || message.author.username;
-
-    // Handle image synchronization
-    if (config.imageSync && message.attachments.size > 0) {
-      const imageMessages = await Promise.all(
-        message.attachments.map(attachment =>
-          targetChannel.send({ 
+  for (const config of configs) {
+    try {
+      const targetChannel = await client.channels.fetch(config.targetChannelId);
+      
+      // Handle image sync
+      if (config.imageSync && message.attachments.size > 0) {
+        await Promise.all(message.attachments.map(attachment => 
+          targetChannel.send({
             files: [attachment.url],
-            content: `**${displayName}:**` // Include display name with images
+            content: `**${displayName}:**`
           })
-        )
-      );
-      imageMessages.forEach(sentMessage => {
-        messageIdMap.set(message.id, sentMessage.id);
-      });
-    }
+        ));
+      }
 
-    // Handle text translation
-    if (message.content.trim()) {
-      const translatedText = await translateText(message.content, config.targetLanguage);
-      const sentMessage = await targetChannel.send(`**${displayName}:** ${translatedText}`);
-      messageIdMap.set(message.id, sentMessage.id);
+      // Handle text translation
+      if (message.content.trim()) {
+        const translatedText = await translateText(message.content, config.targetLanguage);
+        const sentMessage = await targetChannel.send(`**${displayName}:** ${translatedText}`);
+        // Update messageIdMap to track multiple targets
+        const existingMap = messageIdMap.get(message.id) || new Map();
+        existingMap.set(config.targetChannelId, sentMessage.id);
+        messageIdMap.set(message.id, existingMap);
+      }
+    } catch (error) {
+      console.error('Error processing message:', error);
     }
-  } catch (error) {
-    console.error('Error processing message:', error);
   }
 });
 
@@ -131,16 +171,22 @@ client.on("messageReactionAdd", async (reaction, user) => {
   if (user.bot) return;
 
   try {
-    const config = translateChannels.get(reaction.message.channelId);
-    if (!config?.reactionSync) return;
+    const configs = translateChannels.get(reaction.message.channelId);
+    if (!configs) return;
 
-    const targetMessageId = messageIdMap.get(reaction.message.id);
-    if (!targetMessageId) return;
+    const targetMessages = messageIdMap.get(reaction.message.id);
+    if (!targetMessages) return;
 
-    const targetChannel = await client.channels.fetch(config.targetChannelId);
-    const targetMessage = await targetChannel.messages.fetch(targetMessageId);
-    
-    await targetMessage.react(reaction.emoji);
+    for (const config of configs) {
+      if (!config.reactionSync) continue;
+      
+      const targetMessageId = targetMessages.get(config.targetChannelId);
+      if (!targetMessageId) continue;
+
+      const targetChannel = await client.channels.fetch(config.targetChannelId);
+      const targetMessage = await targetChannel.messages.fetch(targetMessageId);
+      await targetMessage.react(reaction.emoji);
+    }
   } catch (error) {
     console.error('Error syncing reaction:', error);
   }
