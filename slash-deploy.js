@@ -29,6 +29,19 @@ const commands = [
       option.setName("channel")
         .setDescription("Target channel to copy messages to")
         .setRequired(true)
+    ),
+    new SlashCommandBuilder()
+    .setName("synch-translate")
+    .setDescription("Translate messages to a language and sync to a channel")
+    .addStringOption(option =>
+      option.setName("language")
+      .setDescription("Target language code (e.g., 'pt', 'es')")
+      .setRequired(true)
+    )
+    .addChannelOption(option =>
+      option.setName("channel")
+      .setDescription("Target channel to send translated messages")
+      .setRequired(true)
     )
 ].map(command => command.toJSON());
 
@@ -37,7 +50,8 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 async function deployCommands() {
   try {
     await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      //Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // for testing on server
+      Routes.applicationCommands(CLIENT_ID),
       { body: commands }
     );
     console.log('Successfully registered application commands.');
