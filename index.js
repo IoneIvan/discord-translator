@@ -1,132 +1,98 @@
-const { Client, Intents, MessageEmbed } = require('discord.js');
-const client = new Client({ 
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require("discord.js");
+
+const client = new Client({
   intents: [
-    Intents.FLAGS.GUILDS,
-    Intents.FLAGS.GUILD_MESSAGES,
-    Intents.FLAGS.DIRECT_MESSAGES
-  ] 
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// Store channel forwarding mappings: Map<sourceChannelId, destinationChannelIds[]>
-const forwardMap = new Map();
 
-client.on('ready', () => {
+// State management
+const activeChannels = new Set();
+const syncChannels = new Map(); // Map<SourceChannelID, TargetChannelID>
+let capitalizeEnabled = false;
+
+client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
 });
 
-client.on('messageCreate', async (message) => {
-  // Ignore bot messages
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isCommand()) return;
+
+  const { commandName, channelId } = interaction;
+
+  try {
+    switch (commandName) {
+      case "ping":
+        await interaction.reply("pong!");
+        break;
+      
+      case "start-copy":
+        activeChannels.add(channelId);
+        await interaction.reply("Started copying messages in this channel!");
+        break;
+      
+      case "stop-copy":
+        activeChannels.delete(channelId);
+        await interaction.reply("Stopped copying messages in this channel!");
+        break;
+      
+      case "capitalize":
+        capitalizeEnabled = interaction.options.getBoolean("enabled");
+        await interaction.reply(`Capitalization ${capitalizeEnabled ? "enabled" : "disabled"}!`);
+        break;
+
+      case "sync":
+        const targetChannel = interaction.options.getChannel("channel");
+        
+        // Check bot permissions in target channel
+        const permissions = targetChannel.permissionsFor(interaction.guild.members.me);
+        if (!permissions.has("SendMessages")) {
+          return interaction.reply("I don't have permission to send messages in that channel!");
+        }
+
+        syncChannels.set(channelId, targetChannel.id);
+        await interaction.reply(`Messages will now be copied to ${targetChannel.toString()}!`);
+        break;
+    }
+  } catch (error) {
+    console.error(`Error handling command ${commandName}:`, error);
+  }
+});
+
+client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  // Check if the message is a command
-  if (message.content.startsWith('!')) {
-    handleCommand(message);
-    return;
+  // Handle same-channel copying
+  if (activeChannels.has(message.channelId)) {
+    let content = message.content;
+    if (capitalizeEnabled) content = content.toUpperCase();
+    
+    try {
+      await message.channel.send(content);
+    } catch (error) {
+      console.error("Error copying message:", error);
+    }
   }
 
-  // Check if message is in a source channel
-  if (forwardMap.has(message.channel.id)) {
-    const destinations = forwardMap.get(message.channel.id);
+  // Handle cross-channel syncing
+  if (syncChannels.has(message.channelId)) {
+    const targetChannelId = syncChannels.get(message.channelId);
+    const targetChannel = await client.channels.fetch(targetChannelId);
     
-    for (const destId of destinations) {
-      const destChannel = client.channels.cache.get(destId);
-      if (!destChannel) continue;
+    let content = message.content;
+    if (capitalizeEnabled) content = content.toUpperCase();
 
-      // Create embed with original message and author info
-      const embed = new MessageEmbed()
-        .setAuthor({
-          name: message.author.tag,
-          iconURL: message.author.displayAvatarURL({ dynamic: true }),
-        })
-        .setDescription(message.content)
-        .setFooter({ text: `Forwarded from #${message.channel.name}` })
-        .setTimestamp();
-
-      // Include attachments if any
-      const files = message.attachments.map(attachment => attachment.url);
-
-      try {
-        await destChannel.send({
-          embeds: [embed],
-          files: files
-        });
-      } catch (error) {
-        console.error(`Error forwarding message to ${destChannel.name}:`, error);
-      }
+    try {
+      await targetChannel.send(content);
+    } catch (error) {
+      console.error(`Error syncing message to ${targetChannelId}:`, error);
     }
   }
 });
 
-function handleCommand(message) {
-  const args = message.content.slice(1).split(' ');
-  const command = args.shift().toLowerCase();
 
-  switch (command) {
-    case 'setforward':
-      if (args.length < 2) {
-        return message.reply('Usage: `!setforward <sourceChannelID> <destinationChannelID>`');
-      }
-
-      const [sourceId, destId] = args;
-      setForwarding(message, sourceId, destId);
-      break;
-
-    case 'removeforward':
-      if (args.length < 2) {
-        return message.reply('Usage: `!removeforward <sourceChannelID> <destinationChannelID>`');
-      }
-
-      const [sourceIdRemove, destIdRemove] = args;
-      removeForwarding(message, sourceIdRemove, destIdRemove);
-      break;
-
-    default:
-      message.reply('Unknown command. Available commands: `!setforward`, `!removeforward`');
-  }
-}
-
-function setForwarding(message, sourceId, destId) {
-  const sourceChannel = client.channels.cache.get(sourceId);
-  const destChannel = client.channels.cache.get(destId);
-
-  if (!sourceChannel || !destChannel) {
-    return message.reply('Invalid channel IDs. Make sure both channels exist and the bot has access.');
-  }
-
-  if (!forwardMap.has(sourceId)) {
-    forwardMap.set(sourceId, []);
-  }
-
-  const destinations = forwardMap.get(sourceId);
-  if (!destinations.includes(destId)) {
-    destinations.push(destId);
-    message.reply(`Messages from ${sourceChannel.name} will now be forwarded to ${destChannel.name}`);
-  } else {
-    message.reply('This forwarding configuration already exists.');
-  }
-}
-
-function removeForwarding(message, sourceId, destId) {
-  if (!forwardMap.has(sourceId)) {
-    return message.reply('No forwarding configured for this source channel.');
-  }
-
-  const destinations = forwardMap.get(sourceId);
-  const index = destinations.indexOf(destId);
-
-  if (index === -1) {
-    return message.reply('This forwarding configuration does not exist.');
-  }
-
-  destinations.splice(index, 1);
-  if (destinations.length === 0) {
-    forwardMap.delete(sourceId);
-  }
-
-  const sourceChannel = client.channels.cache.get(sourceId);
-  const destChannel = client.channels.cache.get(destId);
-  
-  message.reply(`Removed forwarding from ${sourceChannel?.name || 'unknown'} to ${destChannel?.name || 'unknown'}`);
-}
-
-client.login(DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN);
