@@ -1,22 +1,22 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const axios = require('axios');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers, // Added for member data
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
 // State management
-const activeChannels = new Set();
-const syncChannels = new Map(); // Map<SourceChannelID, TargetChannelID>
-const translateChannels = new Map(); // Map<SourceChannelID, {targetChannelId: string, targetLanguage: string}>
-let capitalizeEnabled = false;
+const translateChannels = new Map(); // Map<SourceChannelID, {targetChannelId, targetLanguage, imageSync, reactionSync}>
+const messageIdMap = new Map(); // Map<sourceMessageId, targetMessageId>
 
-// Translation function
 async function translateText(text, targetLang) {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('Google API key missing');
@@ -45,103 +45,104 @@ client.on("interactionCreate", async (interaction) => {
 
   try {
     switch (commandName) {
-      case "ping":
-        await interaction.reply("pong!");
-        break;
-      
-      case "start-copy":
-        activeChannels.add(channelId);
-        await interaction.reply("Started copying messages in this channel!");
-        break;
-      
-      case "stop-copy":
-        activeChannels.delete(channelId);
-        await interaction.reply("Stopped copying messages in this channel!");
-        break;
-      
-      case "capitalize":
-        capitalizeEnabled = interaction.options.getBoolean("enabled");
-        await interaction.reply(`Capitalization ${capitalizeEnabled ? "enabled" : "disabled"}!`);
-        break;
-
-      case "sync":
-        const targetChannel = interaction.options.getChannel("channel");
-        const permissions = targetChannel.permissionsFor(interaction.guild.members.me);
-        if (!permissions.has("SendMessages")) {
-          return interaction.reply("I don't have permission to send messages in that channel!");
-        }
-        syncChannels.set(channelId, targetChannel.id);
-        await interaction.reply(`Messages will now be copied to ${targetChannel.toString()}!`);
-        break;
-
-      case "synch-translate":
+      case "setup-translation-sync": {
         const targetLanguage = interaction.options.getString("language");
         const translateChannel = interaction.options.getChannel("channel");
         
-        const channelPermissions = translateChannel.permissionsFor(interaction.guild.members.me);
-        if (!channelPermissions.has("SendMessages")) {
+        const permissions = translateChannel.permissionsFor(interaction.guild.members.me);
+        if (!permissions.has("SendMessages")) {
           return interaction.reply("I can't send messages in that channel!");
         }
 
         translateChannels.set(channelId, {
           targetChannelId: translateChannel.id,
-          targetLanguage: targetLanguage.toLowerCase()
+          targetLanguage: targetLanguage.toLowerCase(),
+          imageSync: false,
+          reactionSync: false
         });
-        await interaction.reply(`Translating messages to ${targetLanguage} in ${translateChannel.toString()}!`);
+        await interaction.reply(`Translation sync configured for ${translateChannel.toString()} in ${targetLanguage}!`);
         break;
+      }
+
+      case "toggle-image-sync": {
+        const config = translateChannels.get(channelId);
+        if (!config) {
+          return interaction.reply("Set up translation sync first using /setup-translation-sync");
+        }
+        config.imageSync = interaction.options.getBoolean("enabled");
+        await interaction.reply(`Image synchronization ${config.imageSync ? "enabled" : "disabled"}!`);
+        break;
+      }
+
+      case "toggle-reaction-sync": {
+        const config = translateChannels.get(channelId);
+        if (!config) {
+          return interaction.reply("Set up translation sync first using /setup-translation-sync");
+        }
+        config.reactionSync = interaction.options.getBoolean("enabled");
+        await interaction.reply(`Reaction synchronization ${config.reactionSync ? "enabled" : "disabled"}!`);
+        break;
+      }
     }
   } catch (error) {
     console.error(`Error handling command ${commandName}:`, error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: 'There was an error while executing this command!', ephemeral: true });
-    } else {
-      await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
-    }
+    await interaction.reply({ content: 'Command execution failed!', ephemeral: true });
   }
 });
 
+// In the messageCreate handler:
 client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
+  if (message.author.bot || !translateChannels.has(message.channelId)) return;
 
-  // Handle same-channel copying
-  if (activeChannels.has(message.channelId)) {
-    let content = message.content;
-    if (capitalizeEnabled) content = content.toUpperCase();
-    
-    try {
-      await message.channel.send(content);
-    } catch (error) {
-      console.error("Error copying message:", error);
+  const config = translateChannels.get(message.channelId);
+  const targetChannel = await client.channels.fetch(config.targetChannelId);
+
+  try {
+    // Get the author's server-specific display name
+    const displayName = message.member?.displayName || message.author.username;
+
+    // Handle image synchronization
+    if (config.imageSync && message.attachments.size > 0) {
+      const imageMessages = await Promise.all(
+        message.attachments.map(attachment =>
+          targetChannel.send({ 
+            files: [attachment.url],
+            content: `**${displayName}:**` // Include display name with images
+          })
+        )
+      );
+      imageMessages.forEach(sentMessage => {
+        messageIdMap.set(message.id, sentMessage.id);
+      });
     }
+
+    // Handle text translation
+    if (message.content.trim()) {
+      const translatedText = await translateText(message.content, config.targetLanguage);
+      const sentMessage = await targetChannel.send(`**${displayName}:** ${translatedText}`);
+      messageIdMap.set(message.id, sentMessage.id);
+    }
+  } catch (error) {
+    console.error('Error processing message:', error);
   }
+});
 
-  // Handle cross-channel syncing
-  if (syncChannels.has(message.channelId)) {
-    const targetChannelId = syncChannels.get(message.channelId);
-    const targetChannel = await client.channels.fetch(targetChannelId);
+client.on("messageReactionAdd", async (reaction, user) => {
+  if (user.bot) return;
+
+  try {
+    const config = translateChannels.get(reaction.message.channelId);
+    if (!config?.reactionSync) return;
+
+    const targetMessageId = messageIdMap.get(reaction.message.id);
+    if (!targetMessageId) return;
+
+    const targetChannel = await client.channels.fetch(config.targetChannelId);
+    const targetMessage = await targetChannel.messages.fetch(targetMessageId);
     
-    let content = message.content;
-    if (capitalizeEnabled) content = content.toUpperCase();
-
-    try {
-      await targetChannel.send(content);
-    } catch (error) {
-      console.error(`Error syncing message to ${targetChannelId}:`, error);
-    }
-  }
-
-  // Handle translation syncing
-  if (translateChannels.has(message.channelId) && message.content.trim()) {
-    const { targetChannelId, targetLanguage } = translateChannels.get(message.channelId);
-    
-    try {
-      const targetChannel = await client.channels.fetch(targetChannelId);
-      const translatedText = await translateText(message.content, targetLanguage);
-      await targetChannel.send(translatedText);
-    } catch (error) {
-      console.error(`Error translating message to ${targetLanguage}:`, error);
-      // Optionally send error to channel or log somewhere
-    }
+    await targetMessage.react(reaction.emoji);
+  } catch (error) {
+    console.error('Error syncing reaction:', error);
   }
 });
 

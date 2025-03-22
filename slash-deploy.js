@@ -4,44 +4,36 @@ require('dotenv').config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+
 const commands = [
   new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("The first command of everybot."),
-  new SlashCommandBuilder()
-    .setName("start-copy")
-    .setDescription("Start copying messages in this channel."),
-  new SlashCommandBuilder()
-    .setName("stop-copy")
-    .setDescription("Stop copying messages in this channel."),
-  new SlashCommandBuilder()
-    .setName("capitalize")
-    .setDescription("Toggle capitalization for copied messages.")
-    .addBooleanOption(option =>
-      option.setName("enabled")
-        .setDescription("Enable/disable capitalization")
-        .setRequired(true)
-    ),
-    new SlashCommandBuilder()
-    .setName("sync")
-    .setDescription("Copy new messages to a specified channel")
-    .addChannelOption(option =>
-      option.setName("channel")
-        .setDescription("Target channel to copy messages to")
-        .setRequired(true)
-    ),
-    new SlashCommandBuilder()
-    .setName("synch-translate")
-    .setDescription("Translate messages to a language and sync to a channel")
+    .setName("setup-translation-sync")
+    .setDescription("Set up translation synchronization between channels")
     .addStringOption(option =>
       option.setName("language")
-      .setDescription("Target language code (e.g., 'pt', 'es')")
-      .setRequired(true)
+        .setDescription("Target language code (e.g., 'pt', 'es')")
+        .setRequired(true)
     )
     .addChannelOption(option =>
       option.setName("channel")
-      .setDescription("Target channel to send translated messages")
-      .setRequired(true)
+        .setDescription("Target channel for translated messages")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("toggle-image-sync")
+    .setDescription("Enable/disable image synchronization for translations")
+    .addBooleanOption(option =>
+      option.setName("enabled")
+        .setDescription("Enable image synchronization")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("toggle-reaction-sync")
+    .setDescription("Enable/disable reaction synchronization for translations")
+    .addBooleanOption(option =>
+      option.setName("enabled")
+        .setDescription("Enable reaction synchronization")
+        .setRequired(true)
     )
 ].map(command => command.toJSON());
 
@@ -50,7 +42,7 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 async function deployCommands() {
   try {
     await rest.put(
-      //Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // for testing on server
+      //Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // for testing on
       Routes.applicationCommands(CLIENT_ID),
       { body: commands }
     );
