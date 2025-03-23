@@ -55,8 +55,8 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 async function deployCommands() {
   try {
     await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // for testing on a specific guild
-      // Routes.applicationCommands(CLIENT_ID), // for global commands
+      //Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), // for testing on a specific guild
+       Routes.applicationCommands(CLIENT_ID), // for global commands
       { body: commands }
     );
     console.log('Successfully registered application commands.');
